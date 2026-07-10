@@ -10,7 +10,7 @@ def get_model()-> SentenceTransformer:
 def embed_chunks(chunks:list[str]):
     #converts the chunks into embedding vectors
     model=get_model()
-    embeddings=model.encode(chunks)
+    embeddings=model.encode(chunks,normalize_embeddings=True)
     return embeddings
 if __name__=="__main__":
     from src.loader import load_pdf
