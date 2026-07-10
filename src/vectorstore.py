@@ -16,7 +16,7 @@ class VectorStore:
         similarities,indices=self.index.search(query_embedding,top_k)
         results=[]
         for idx,sim in zip(indices[0],similarities[0]):
-            results.append({"chunk":self.chunks[idx],"similarity":float(sim)})
+            results.append({"chunk":self.chunks[idx],"similarity":float(sim),"index":int(idx)})
         return results
 if __name__=="__main__":
     from src.loader import load_pdf

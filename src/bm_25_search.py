@@ -14,7 +14,7 @@ class BM25Search:
         top_results=ranked[:top_k]
         results=[]
         for idx,score in top_results:
-            results.append({"chunk":self.chunks[idx],"score":float(score)})
+            results.append({"chunk":self.chunks[idx],"score":float(score),"index":int(idx)})
         return results
 if __name__=="__main__":
     from src.loader import load_pdf
