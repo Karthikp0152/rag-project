@@ -7,7 +7,7 @@ def split_into_sentences(text:str)->list[str]:
     sentences=re.split(r'(?<=[.!?])\s+',text)
     sentences=[s.strip() for s in sentences if s.strip()]
     return sentences
-def semantic_chunk(text:str,similarity_threshold:float=0.5,max_chunk_size:int=1000)->list[str]:
+def semantic_chunk(text:str,similarity_threshold:float=0.3,max_chunk_size:int=1000)->list[str]:
     #group the sentences into chunks based on similaririty search between the sentences and if the similarity score is high then we can continue with the chunks and just if it drops too low then we do a new chunk
     sentences=split_into_sentences(text)
     if not sentences:
@@ -34,7 +34,18 @@ if __name__=="__main__":
     from src.loader import load_pdf
     text=load_pdf("data/_OceanofPDF.com_Pretty_Reckless_-_LJ_Shen.pdf")
     chunks=semantic_chunk(text)
+    avg_length=sum(len(c) for c in chunks)/len(chunks)
+    lengths=sorted(len(c) for c in chunks)
     print(f"Total semantic chunks:{len(chunks)}")
+    print(f"Average chunk length:{avg_length:.1f} characters")
+    print(f"shortest chunk:{lengths[0]} characters")
+    print(f"Longest chunk:{lengths[-1]} characters")
+    mid=len(chunks)//2
+    print(f"\n---Sample chunk from the middle (index{mid})---")
+    print(chunks[mid])
+    print(f"\n---Next chunk after it (index {mid+1})---")
+    print(chunks[mid+1])
+
     print(f"\n--First Chunk--")
     print(chunks[0])
     print(f"\n--Second Chunk--")
