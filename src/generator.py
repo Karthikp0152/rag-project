@@ -10,7 +10,7 @@ def get_client()->genai.Client:
       api_key=os.environ["GEMINI_API_KEY"]
       _client=genai.Client(api_key=api_key)
     return _client
-def build_prompt(question:str,query:list[str])->str:
+def build_prompt(question:str,chunks:list[str])->str:
     #it combines the query and the top k retrieved chunks and generates a prompt
     context="\n\n".join(chunks)
     prompt=f"""Answer the question using only the context below.If the context doesn't contain the answer,say you do not have enough information.
