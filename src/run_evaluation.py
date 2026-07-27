@@ -3,7 +3,7 @@ import time
 from dotenv import load_dotenv
 from datasets import Dataset
 from ragas import evaluate
-from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
+from ragas.metrics import context_recall
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 
 from src.eval_data import TEST_CASES
@@ -49,10 +49,11 @@ def run_config(use_semantic_chunking: bool, use_reranking: bool):
 
     result = evaluate(
         dataset,
-        metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
+        metrics=[context_recall],
         llm=judge_llm,
         embeddings=judge_embeddings,
     )
+    print(result.to_pandas())
 
     return result
 
@@ -60,9 +61,9 @@ def run_config(use_semantic_chunking: bool, use_reranking: bool):
 if __name__ == "__main__":
     configs = [
         {"use_semantic_chunking": False, "use_reranking": False},
-        {"use_semantic_chunking": False, "use_reranking": True},
-        {"use_semantic_chunking": True, "use_reranking": False},
-        {"use_semantic_chunking": True, "use_reranking": True},
+        #{"use_semantic_chunking": False, "use_reranking": True},
+        #{"use_semantic_chunking": True, "use_reranking": False},
+        #{"use_semantic_chunking": True, "use_reranking": True},
     ]
 
     for config in configs:
