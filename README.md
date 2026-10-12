@@ -3,7 +3,8 @@
 A retrieval-augmented generation (RAG) system that answers questions about a single novel
 (*Pretty Reckless* by L.J. Shen, ~580k characters), built step by step and evaluated with
 [RAGAS](https://docs.ragas.io/). The project compares two chunking strategies and the effect of
-a cross-encoder reranker, and documents the failures found along the way and how each was handled.
+a cross-encoder reranker, adds a first multimodal step (reading the PDF's images), and documents the
+failures found along the way and how each was handled.
 
 ## Contents
 
@@ -11,6 +12,7 @@ a cross-encoder reranker, and documents the failures found along the way and how
 - [How the project was built (phases)](#how-the-project-was-built-phases)
 - [Evaluation setup](#evaluation-setup)
 - [Results](#results)
+- [Reading images (multimodal step 1)](#reading-images-multimodal-step-1)
 - [Failures and how they were contained](#failures-and-how-they-were-contained)
 - [Known limitations](#known-limitations)
 - [Running it](#running-it)
@@ -26,6 +28,8 @@ PDF ──► loader ──► chunker ──► embeddings ──► FAISS (den
 | Stage | Implementation | File |
 |---|---|---|
 | Loading | `pypdf`, then cleanup: watermark removal, de-hyphenation, soft-wrap joining | [src/loader.py](src/loader.py) |
+| Image reading (optional) | `pymupdf` extracts page images; Gemini classifies each as text, picture, or decoration and transcribes or describes it; cached per image | [src/image_reader.py](src/image_reader.py) |
+| Sections (optional) | Splits the document at headings (large text or short image text) and prefixes every chunk with its heading, e.g. `[Chapter ONE · Daria]` | [src/loader.py](src/loader.py), [src/pipeline_run.py](src/pipeline_run.py) |
 | Fixed chunking | ~500-char chunks on word boundaries, 50-char overlap → 1,293 chunks | [src/chunker.py](src/chunker.py) |
 | Semantic chunking | Sentences grouped while they stay similar to the chunk's running centroid (threshold 0.3, 400–900 chars, 1-sentence overlap) → 728 chunks, ~860 chars avg | [src/semantic_chunker.py](src/semantic_chunker.py) |
 | Embeddings | `BAAI/bge-small-en-v1.5`, normalized, cached to `.cache/` | [src/embeddings.py](src/embeddings.py) |
@@ -71,6 +75,12 @@ With the pipeline working, the remaining problems were in the evaluation itself:
 a precision metric stuck at zero, refusals scored by exact wording, and too few test questions.
 These are covered in [Failures](#failures-and-how-they-were-contained) 2–6. Two full final runs
 were made on the corrected setup.
+
+### Phase 7: Reading images, a first multimodal step (Oct)
+Answers kept calling someone "the narrator" as if it were a separate character. The cause: this
+book's chapter headings, including the narrator's name, are **images**, invisible to text
+extraction. Added image reading with Gemini and section-heading tags on every chunk (see
+[Reading images](#reading-images-multimodal-step-1) and Failures 7–9).
 
 ## Evaluation setup
 
@@ -133,7 +143,7 @@ Run 1: [eval_logs/results/summary_20261012-0509.csv](eval_logs/results/summary_2
    one answer changing moves an average by ~0.05.
 5. Among the three improved configurations, recall is too close to name a single winner.
 
-### Recommended configuration: semantic chunking + reranker
+### Recommended configuration (text only): semantic chunking + reranker
 
 Averaged over both runs:
 
@@ -154,8 +164,8 @@ Averaged over both runs:
   but is the least faithful. Fixed + reranker has slightly lower recall with no offsetting gain.
 
 This recommendation rests on a small but consistent faithfulness gap (22 questions, 2 runs). Treat
-it as the best choice under this evaluation, not a proven result. This is the configuration
-`python -m src.generator` uses.
+it as the best choice under this evaluation, not a proven result. Adding image reading on top of it
+improved it further; see the next section.
 
 ### Earliest results, for comparison
 The first evaluation (Aug, 4 questions, top 3 chunks, old pipeline) scored:
@@ -166,6 +176,63 @@ The first evaluation (Aug, 4 questions, top 3 chunks, old pipeline) scored:
 | Fixed + reranker | 0.25 | 0.00 | 0.50 |
 | Semantic, no reranker | 0.00 | 0.00 | 0.25 |
 | Semantic + reranker | 0.00 | 0.00 | 0.46 |
+
+## Reading images (multimodal step 1)
+
+### The problem
+In this PDF, every chapter starts with three images: a decorative *"Chapter ONE"* title, an
+ornament, and the narrator's name (*"Daria"*, *"Penn"*) in script. `pypdf` extracts only text, so
+the pipeline never knew whose chapter a passage came from. In first-person chapters, *"I"* is
+Penn in some and Daria in others. The generator couldn't tell them apart and wrote answers about
+*"the narrator"* as if it were a third character.
+
+### What was added
+Everything is behind a switch, off by default, so all earlier results stay reproducible.
+
+1. **Image reading** ([src/image_reader.py](src/image_reader.py)): each page image is sent to
+   Gemini, which classifies it as *text* (transcribed exactly), *picture* (described factually), or
+   *decoration* (skipped). Results are cached by image hash, so the book's 140 images cost 43
+   one-time calls (most are repeats).
+2. **Sections** (`load_pdf_sections` in [src/loader.py](src/loader.py)): the document is split at
+   headings found from **either source**: text at least 1.25× the body font size, or short text
+   read from an image. This way normal documents with text headings also get sections. All heading
+   pieces on one page are joined, so *"Chapter ONE"* above the epigraph and *"Daria"* below it
+   become one heading. Pictures reused on 3+ pages are treated as ornaments and skipped.
+3. **Heading tags** ([src/pipeline_run.py](src/pipeline_run.py)): each section is chunked on its own,
+   and every chunk starts with its heading:
+   ```
+   before: "...the boy gives me a piece of orange sea glass..."
+   after:  "[Prologue · Daria] ...the boy gives me a piece of orange sea glass..."
+   ```
+4. **Generator note** ([src/generator.py](src/generator.py)): one extra prompt line, only when the
+   switch is on, telling the model that a name in the heading usually identifies who *"I"* is.
+
+The book now splits into 45 sections. That revealed structure the text alone hid: some chapters
+switch narrator partway through, and a few sections are narrated by Melody and by Jaime.
+
+### Results
+Semantic chunking + reranker, run twice with images and twice without (22 scored questions):
+
+| Semantic + reranker | Recall | Precision | Faithfulness | Answer relevancy | Refused trick questions |
+|---|---|---|---|---|---|
+| Without images, run 1 | 0.61 | 0.40 | 0.90 | 0.59 | 3/3 |
+| Without images, run 2 | 0.58 | 0.41 | 0.88 | 0.66 | 3/3 |
+| **With images, run 1** | **0.67** | **0.47** | **0.93** | **0.82** | 3/3 |
+| **With images, run 2** | **0.67** | **0.49** | **0.92** | **0.77** | 3/3 |
+| *Average change* | *+0.07* | *+0.07* | *+0.04* | *+0.17* | |
+
+Image runs: [results/summary_20261012-1955.csv](results/summary_20261012-1955.csv),
+[results/summary_20261012-2033.csv](results/summary_20261012-2033.csv).
+
+On every metric, the worse image run beats the better run without images, so these gains are not
+run-to-run noise. The biggest gain is answer relevancy: answers now name Penn and Daria correctly
+instead of describing *"the narrator"*. Asked *"What happens between the main characters?"*, the
+pipeline without images used "narrator" throughout its answer and mixed the two people up; with
+images, it named both correctly and never used "narrator".
+
+**Final recommended configuration: semantic chunking + reranker + image reading.** This is what
+`python -m src.generator` runs. Image reading was only evaluated on this configuration, not on the
+other three.
 
 ## Failures and how they were contained
 
@@ -227,13 +294,45 @@ character's perspective plus keywords, with the results fused and reranked. This
 passage from rank ~289 to ~78, still far from the top 20. The rewrite cannot supply words like
 *"sea glass"* without using the model's own knowledge of the book, which would leak answers into
 the evaluation. Since it added cost without fixing the problem, it was removed.
-**Status:** documented as a known limitation (below).
+**Status:** still unsolved after image reading. The chunk now starts with `[Prologue · Daria]`,
+but about half the book's chunks contain "Daria" now, so the name no longer singles it out. It
+remains a known limitation (below).
+
+### 7. Answers confused the narrator with a third character
+**Symptom:** answers described *"the narrator"* separately from Penn and Daria, e.g. *"brought
+Daria to the park to watch the narrator and Adriana"*, where the narrator was Penn.
+**Cause:** each passage is an excerpt of a first-person chapter, and the names identifying the
+narrator are in heading images that text extraction cannot see.
+**Fix:** image reading and section-heading tags ([Reading images](#reading-images-multimodal-step-1)).
+Answers stopped using "narrator", and answer relevancy rose by ~0.17.
+
+### 8. A decorative image was inserted into every chapter
+**Symptom:** with image reading on, *"[Image: A pair of pink ballet pointe shoes with ribbons.]"*
+appeared at the start of ~30 chapters.
+**Cause:** Gemini described the chapter ornament as a picture rather than decoration.
+**Fix:** pictures reused on 3 or more pages are treated as template ornaments and skipped.
+Repeated *text* images are kept, since those are headings such as a narrator's name.
+
+### 9. Enlarged opening sentences detected as headings
+**Symptom:** text-heading detection split the book at sentences like *"The snake pit is crowded
+tonight."*
+**Cause:** some chapters print their first sentence in a larger font, which passes the font-size
+test for headings.
+**Fix:** a heading candidate must not end in sentence punctuation (`. ! ? "`). Real headings
+rarely do.
 
 ## Known limitations
 
-- **First-person passages without names** (Failure 6) are hard to retrieve. A likely fix is
-  contextual chunk headers (an LLM-written line per chunk saying who is involved), at the cost of
-  roughly one LLM call per chunk.
+- **First-person passages without names** (Failure 6) can still be hard to retrieve. Section tags
+  fixed *who "I" is* in answers, but not retrieval of a passage whose key words aren't in the
+  question. A likely next step is contextual chunk headers (an LLM-written line per chunk saying who
+  and what is involved), at the cost of roughly one LLM call per chunk.
+- **Image reading is a first step, not full multimodal RAG.** Images are converted to text at load
+  time; there is no image search, and images are not shown to the model when answering. Image text
+  is placed at the top of its page, which is right for headings but approximate for figures in the
+  middle of a page.
+- **Heading detection is heuristic** (font size, short text, no sentence ending, repeated
+  pictures). It fits this book; other layouts may need tuning.
 - **The refusal check is pattern-based.** An answer that invents a fact *and* says "the passages
   do not mention…" would count as a refusal. No observed answer did this.
 - **Small test set.** 22 scored questions only detect differences larger than ~0.05–0.1. Some
@@ -264,10 +363,14 @@ VERTEX_LOCATION=us-central1
 Run:
 
 ```bash
-python -m src.generator                    # ask one question end to end (semantic + reranker)
+python -m src.generator                    # ask one question end to end (semantic + reranker + images)
 python -m src.run_evaluation               # all 4 configurations (~1 hour)
 python -m src.run_evaluation --only 3      # one config: 0 fixed/off, 1 fixed/on, 2 semantic/off, 3 semantic/on
+python -m src.run_evaluation --only 3 --read-images   # same, with image reading and section tags
 ```
+
+The first run with images makes one Gemini call per unique image (43 for this book); results are
+cached in `.cache/image_text.json`, so later runs make none.
 
 Per-question scores are written to `results/<config>_<timestamp>.csv` and averages to
 `results/summary_<timestamp>.csv`. Older runs and logs are kept in [eval_logs/](eval_logs/).

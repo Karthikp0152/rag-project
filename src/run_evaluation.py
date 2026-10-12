@@ -96,24 +96,28 @@ def declined_unanswerable(answer: str) -> bool:
     return is_abstention(answer) or bool(_DECLINE.search(answer))
 
 
-def config_label(use_semantic_chunking: bool, use_reranking: bool) -> str:
+def config_label(use_semantic_chunking: bool, use_reranking: bool, read_images: bool = False) -> str:
     return (
         f"chunk-{'semantic' if use_semantic_chunking else 'fixed'}"
         f"_rerank-{'on' if use_reranking else 'off'}"
+        f"{'_img' if read_images else ''}"
     )
 
 
-def run_config(use_semantic_chunking, use_reranking, judge, judge_embeddings, top_k, candidate_k):
-    label = config_label(use_semantic_chunking, use_reranking)
+def run_config(
+    use_semantic_chunking, use_reranking, judge, judge_embeddings, top_k, candidate_k,
+    read_images=False,
+):
+    label = config_label(use_semantic_chunking, use_reranking, read_images)
     print(f"\n=== {label} (top_k={top_k}, candidate_k={candidate_k}) ===")
 
-    store, hybrid = build_pipeline(use_semantic_chunking)
+    store, hybrid = build_pipeline(use_semantic_chunking, read_images=read_images)
 
     records = []
     for case in TEST_CASES:
         contexts, answer = run_query(
             case["question"], store, hybrid, use_reranking,
-            top_k=top_k, candidate_k=candidate_k,
+            top_k=top_k, candidate_k=candidate_k, section_headings=read_images,
         )
         records.append({
             "question": case["question"],
@@ -170,6 +174,10 @@ if __name__ == "__main__":
     parser.add_argument("--only", type=int, choices=range(len(CONFIGS)))
     parser.add_argument("--top-k", type=int, default=TOP_K)
     parser.add_argument("--candidate-k", type=int, default=CANDIDATE_K)
+    parser.add_argument(
+        "--read-images", action="store_true",
+        help="read PDF images with Gemini and tag chunks with their section heading",
+    )
     args = parser.parse_args()
 
     selected = [CONFIGS[args.only]] if args.only is not None else CONFIGS
@@ -186,6 +194,7 @@ if __name__ == "__main__":
                 judge_embeddings=judge_embeddings,
                 top_k=args.top_k,
                 candidate_k=args.candidate_k,
+                read_images=args.read_images,
             )
         )
 

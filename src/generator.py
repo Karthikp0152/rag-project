@@ -28,14 +28,23 @@ def get_client() -> genai.Client:
     return _client
 
 
-def build_prompt(question: str, chunks: list[str]) -> str:
+HEADING_NOTE = (
+    "After its number, a passage may start with its section heading in brackets, like "
+    "[Chapter ONE · Daria]. Use the heading as context. In first-person text, a person's "
+    "name in the heading usually identifies who \"I\" is in that passage; refer to that "
+    "person by name rather than as \"the narrator\".\n"
+)
+
+
+def build_prompt(question: str, chunks: list[str], section_headings: bool = False) -> str:
     passages = "\n\n".join(
         f"[{i}] {chunk.strip()}" for i, chunk in enumerate(chunks, start=1)
     )
     return (
         "You answer questions about a novel using retrieved passages.\n"
         "The passages are excerpts, may be out of order, and may not all be relevant.\n"
-        "Use only what the passages state. Do not use outside knowledge.\n"
+        + (HEADING_NOTE if section_headings else "")
+        + "Use only what the passages state. Do not use outside knowledge.\n"
         "Partial evidence is still evidence: answer what the passages support and say "
         "what remains unclear.\n"
         f"Only if the passages support no part of an answer, reply exactly: {NO_ANSWER}\n"
@@ -46,11 +55,13 @@ def build_prompt(question: str, chunks: list[str]) -> str:
     )
 
 
-def generate_answer(question: str, chunks: list[str], temperature: float = 0.0) -> str:
+def generate_answer(
+    question: str, chunks: list[str], temperature: float = 0.0, section_headings: bool = False
+) -> str:
     if not chunks:
         return NO_ANSWER
 
-    prompt = build_prompt(question, chunks)
+    prompt = build_prompt(question, chunks, section_headings=section_headings)
     config = types.GenerateContentConfig(temperature=temperature)
 
     for attempt in range(MAX_RETRIES):
@@ -72,10 +83,13 @@ def generate_answer(question: str, chunks: list[str], temperature: float = 0.0) 
 if __name__ == "__main__":
     from src.pipeline_run import build_pipeline, run_query
 
-    # Recommended configuration from the evaluation: semantic chunking + reranker.
-    store, hybrid = build_pipeline(use_semantic_chunking=True)
+    # Recommended configuration from the evaluation: semantic chunking + reranker,
+    # with PDF images read and chunks tagged with their section heading.
+    store, hybrid = build_pipeline(use_semantic_chunking=True, read_images=True)
     question = "What happens between the main characters?"
-    contexts, answer = run_query(question, store, hybrid, use_reranking=True)
+    contexts, answer = run_query(
+        question, store, hybrid, use_reranking=True, section_headings=True
+    )
     print("Question:", question)
     print(f"\nRetrieved {len(contexts)} passages")
     print("\nAnswer:", answer)
