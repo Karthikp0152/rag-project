@@ -14,6 +14,7 @@ failures found along the way and how each was handled.
 - [Results](#results)
 - [Reading images (multimodal step 1)](#reading-images-multimodal-step-1)
 - [Asking about your own files (step 2)](#asking-about-your-own-files-step-2)
+- [Looking at images when answering (step 3)](#looking-at-images-when-answering-step-3)
 - [Failures and how they were contained](#failures-and-how-they-were-contained)
 - [Known limitations](#known-limitations)
 - [Running it](#running-it)
@@ -30,6 +31,7 @@ PDF ──► loader ──► chunker ──► embeddings ──► FAISS (den
 |---|---|---|
 | Loading | `pypdf`, then cleanup: watermark removal, de-hyphenation, soft-wrap joining | [src/loader.py](src/loader.py) |
 | Image reading (optional) | `pymupdf` extracts page images; Gemini classifies each as text, picture, or decoration and transcribes or describes it; cached per image | [src/image_reader.py](src/image_reader.py) |
+| Image search (optional) | CLIP (`clip-ViT-B-32`, local) embeds images and questions in one space; matching images are sent to Gemini with the passages | [src/image_index.py](src/image_index.py) |
 | Sections (optional) | Splits the document at headings (large text or short image text) and prefixes every chunk with its heading, e.g. `[Chapter ONE · Daria]` | [src/loader.py](src/loader.py), [src/pipeline_run.py](src/pipeline_run.py) |
 | Fixed chunking | ~500-char chunks on word boundaries, 50-char overlap → 1,293 chunks | [src/chunker.py](src/chunker.py) |
 | Semantic chunking | Sentences grouped while they stay similar to the chunk's running centroid (threshold 0.3, 400–900 chars, 1-sentence overlap) → 728 chunks, ~860 chars avg | [src/semantic_chunker.py](src/semantic_chunker.py) |
@@ -87,6 +89,11 @@ extraction. Added image reading with Gemini and section-heading tags on every ch
 Removed the dependence on this one book: the system now loads PDF, Word, image, and text/Markdown
 files, indexes several together, caches each file's processing on disk, and answers questions in
 an interactive terminal loop (see [Asking about your own files](#asking-about-your-own-files-step-2)).
+
+### Phase 9: Looking at images when answering (Oct)
+Turning images into text loses information a description leaves out, such as where things sit in
+a diagram. Added image search with CLIP and an option to send matching images to Gemini with the
+passages (see [Looking at images](#looking-at-images-when-answering-step-3)).
 
 ## Evaluation setup
 
@@ -296,6 +303,81 @@ and the loop lists which file and section each cited passage came from.
 This is a functional check, not a RAGAS evaluation: scoring other document types properly needs
 new test questions with reference answers for them.
 
+## Looking at images when answering (step 3)
+
+```bash
+python -m src.ask --images-in-answers building_guide.docx handbook.docx meeting_notes.jpg faq.md
+```
+```
+Ready: 8 passages, 3 images. Ask a question, or press Enter to quit.
+
+> Which room is directly below Reception?
+Meeting room A is directly below Reception [I1].
+
+Sources:
+  [I1] building_guide.docx · Building C Visitor Guide · Layout (image)
+```
+
+### Why
+Step 1 turns each image into a text description, and only that text is searched and read. A
+description keeps names and numbers but often drops layout. For a floor plan, Gemini's description
+listed the six room names but not where they are relative to each other, so questions like
+*"Which room is directly below Reception?"* could not be answered.
+
+### What was added
+Everything is behind `--images-in-answers`, off by default.
+
+1. **Images are kept** ([src/image_index.py](src/image_index.py)): content images (charts, photos,
+   diagrams, scanned pages) are saved in `.cache/images/` under a content fingerprint. Headings,
+   ornaments, and decorations are not. Each image's caption in the text carries its ID, e.g.
+   `[Image ca0c5db0bfe7: A ground floor plan…]`, linking a passage back to its picture.
+2. **Image search:** CLIP, a local model (free to run), embeds images and questions in the same
+   space, so a question can match a picture directly. Embeddings are cached per image.
+3. **Choosing what to send** (`select_images` in [src/pipeline_run.py](src/pipeline_run.py)): an
+   image is sent only if CLIP rates it a strong match for the question (score ≥ 0.25), at most 3
+   per question, shrunk to ≤768 px. Images whose captions were also retrieved go first.
+   **Exception:** if the question explicitly names a visual (*image, picture, photo, diagram, chart,
+   graph, figure, map, floor plan, screenshot…*), the best matches are sent regardless of score,
+   because a vague *"What is in the image?"* scores low with CLIP (0.20) but clearly wants the
+   picture. *"Figure out"* does not count.
+4. **Answering** ([src/generator.py](src/generator.py)): the chosen images are attached after the
+   prompt, labelled `[I1]`, `[I2]`, and the model is told to cite them and to trust the image over
+   its text description. Without images, the prompt is unchanged.
+
+**Cost:** CLIP runs locally. Gemini input grows only for questions where an image matches; text-only
+questions, and documents without images, cost exactly what they did before.
+
+### Calibrating the threshold
+CLIP similarity for the right image was 0.26–0.36 on the sample questions. For unrelated images it
+was at most 0.22 (e.g. *"Who is the CEO?"* vs the returns chart: 0.220). With the ≥ 0.25 rule, each
+of 8 test questions sent exactly the relevant image, and text-only questions sent none.
+
+### Results
+Same questions, same retrieved passages, images off vs on (answers checked against the files):
+
+| Question | Images off (text only) | Images on |
+|---|---|---|
+| Which room is directly to the right of the server room? | refused | **Kitchen** ✅ |
+| Which room is between Meeting room A and Lab 2? | Storage ✅ | Storage ✅ |
+| Which room is directly below Reception? | refused | **Meeting room A** ✅ |
+| Which room is closest to the fire exit? | refused | **Lab 2** ✅ |
+| Which quarter had the most returns? | Q3, 210 ✅ | Q3, 210 ✅ |
+| Points for a $10 voucher? (no image needed) | 500 ✅ | 500 ✅, no image sent |
+
+Images on: 6/6 correct; images off: 3/6, and the other three were refused rather than guessed.
+
+**Questions about the image itself.** *"What is in the image?"* is answered even with images off,
+from the step-1 description. With images on, the picture is now sent too and cited as `[I1]`.
+*"Describe the chart"* (4 files loaded) gave the chart's title and all four quarterly values; *"Who is
+the CEO?"* still sent no image. Two trade-offs: a vague question with several images loaded may
+describe only the best match, so naming the visual (*"the chart"*) works best; and an explicit visual
+question can send up to 3 images, not just the one it is about.
+The book pipeline is unaffected: its chunks are identical to before (checked by fingerprint).
+
+This is a small functional test on purpose-made samples, not a RAGAS evaluation. The RAGAS judge
+reads only text, so it cannot check an answer that came from a picture; scoring image-based
+answers needs its own test set and checks.
+
 ## Failures and how they were contained
 
 ### 1. Semantic chunking found nothing (recall 0.00)
@@ -391,16 +473,36 @@ it. Table rows were separated by single line breaks, which text cleanup joins in
 **Fix:** the title is level 0, so it leads every heading path. Each table row is written as its
 own paragraph with its column names, so a row still makes sense after chunking splits the table.
 
+### 11. Every image was sent with every question
+**Symptom:** in the first version of image selection, all 3 sample images were sent for every
+question, including *"How many loyalty points…?"*, which has nothing to do with images.
+**Cause:** an image was selected whenever its caption appeared in the retrieved passages. The sample
+files only have 8 passages, so the top 20 included all of them; even only the top 3 still pulled in
+unrelated images, because each passage is a whole section that matches many questions.
+**Fix:** CLIP's score decides whether an image is sent (≥ 0.25); caption links only set the order.
+After the change, each question sent exactly the relevant image, and unrelated questions sent none.
+
+### 12. Mixed citations were not listed as sources
+**Symptom:** for *"Which room is closest to the fire exit?"* the answer cited `[I1, 1]`, but no
+sources were printed.
+**Cause:** the citation parser handled `[1, 2]` and `[I1, I2]` but not an image and a passage in the
+same bracket.
+**Fix:** one parser accepts any mix of passage and image numbers.
+
 ## Known limitations
 
 - **First-person passages without names** (Failure 6) can still be hard to retrieve. Section tags
   fixed *who "I" is* in answers, but not retrieval of a passage whose key words aren't in the
   question. A likely next step is contextual chunk headers (an LLM-written line per chunk saying who
   and what is involved), at the cost of roughly one LLM call per chunk.
-- **Image reading is a first step, not full multimodal RAG.** Images are converted to text at load
-  time; there is no image search, and images are not shown to the model when answering. Image text
-  is placed at the top of its page, which is right for headings but approximate for figures in the
-  middle of a page.
+- **Image placement:** in PDFs, image text is placed at the top of its page, which is right for
+  headings but approximate for figures in the middle of a page.
+- **Image search is calibrated on very little data.** The 0.25 CLIP threshold comes from 8
+  questions and 3 images; other documents may need a different value. CLIP is a small general model,
+  good at "this is a floor plan" but weak at reading small text, which is why the text description
+  from step 1 is kept alongside it.
+- **Image-based answers are not scored.** RAGAS reads only text, so answers drawn from pictures
+  were checked by hand.
 - **Heading detection is heuristic** (font size, short text, no sentence ending, repeated
   pictures). It fits this book; other layouts may need tuning.
 - **File types:** no `.doc`, `.pptx`, `.xlsx`, or HTML yet. Tables inside PDFs are read as plain
@@ -438,6 +540,7 @@ Run:
 
 ```bash
 python -m src.ask file1.pdf file2.docx ...  # ask questions about your own files (interactive)
+python -m src.ask --images-in-answers file1.pdf ...  # also show matching images to the model
 python -m src.generator                    # one fixed demo question about the book
 python -m src.run_evaluation               # all 4 configurations (~1 hour)
 python -m src.run_evaluation --only 3      # one config: 0 fixed/off, 1 fixed/on, 2 semantic/off, 3 semantic/on

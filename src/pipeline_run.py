@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 
 import numpy as np
 
@@ -19,7 +20,7 @@ CANDIDATE_K = 100
 
 LIBRARY_CACHE_DIR = os.path.join(".cache", "library")
 # Bump when loading or chunking logic changes, so cached chunks are rebuilt.
-LIBRARY_CACHE_VERSION = 1
+LIBRARY_CACHE_VERSION = 2
 
 _pipeline_cache: dict[str, tuple] = {}
 
@@ -58,8 +59,8 @@ def build_pipeline(use_semantic_chunking: bool, read_images: bool = False):
     return store, hybrid
 
 
-def _file_chunks(path: str, use_semantic_chunking: bool, read_images: bool) -> list[list]:
-    """Return [[heading, chunk_text], ...] for one file.
+def _file_chunks(path: str, use_semantic_chunking: bool, read_images: bool) -> dict:
+    """Return {"chunks": [[heading, chunk_text], ...], "images": [image records]} for one file.
 
     Cached on disk by file content and settings, so a file is read and chunked once;
     after that, loading it takes seconds instead of re-running the chunker.
@@ -75,26 +76,36 @@ def _file_chunks(path: str, use_semantic_chunking: bool, read_images: bool) -> l
             return json.load(f)
 
     chunker = semantic_chunk if use_semantic_chunking else chunk_text
-    pairs = [
-        [section["heading"], chunk]
-        for section in load_document(path, read_images=read_images)
-        for chunk in chunker(section["text"])
-    ]
+    images: list[dict] = []
+    sections = load_document(path, read_images=read_images, images=images)
+    result = {
+        "chunks": [
+            [section["heading"], chunk] for section in sections for chunk in chunker(section["text"])
+        ],
+        "images": images,
+    }
     os.makedirs(LIBRARY_CACHE_DIR, exist_ok=True)
     with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump(pairs, f, ensure_ascii=False)
-    return pairs
+        json.dump(result, f, ensure_ascii=False)
+    return result
 
 
 def build_library(paths: list[str], use_semantic_chunking: bool = True, read_images: bool = True):
-    """Index several files together. Every chunk is tagged [file · heading]."""
+    """Index several files together. Every chunk is tagged [file · heading].
+
+    Returns (store, hybrid, images), where images lists the content images found, each
+    {"id", "source", "page", "heading", "caption"}.
+    """
     mode = "semantic" if use_semantic_chunking else "fixed"
     all_chunks: list[str] = []
     all_embeddings = []
+    all_images: list[dict] = []
     for path in paths:
         source = os.path.basename(path)
+        loaded = _file_chunks(path, use_semantic_chunking, read_images)
+        all_images.extend({**image, "source": source} for image in loaded["images"])
         chunks = []
-        for heading, chunk in _file_chunks(path, use_semantic_chunking, read_images):
+        for heading, chunk in loaded["chunks"]:
             label = " · ".join(part for part in (source, heading) if part)
             chunks.append(f"[{label}] {chunk}")
         if not chunks:
@@ -109,7 +120,48 @@ def build_library(paths: list[str], use_semantic_chunking: bool = True, read_ima
     embeddings = np.vstack(all_embeddings)
     store = VectorStore(dimension=embeddings.shape[1])
     store.add(embeddings, all_chunks)
-    return store, HybridSearch(store, BM25Search(all_chunks))
+    return store, HybridSearch(store, BM25Search(all_chunks)), all_images
+
+
+# Questions that explicitly ask about a visual ("what is in the image?") are often too vague
+# for CLIP to score highly, but clearly want the picture itself.
+_ASKS_FOR_VISUAL = re.compile(
+    r"\b(?:images?|pictures?|photos?|photographs?|diagrams?|charts?|graphs?|plots?|maps?"
+    r"|floor ?plans?|illustrations?|screenshots?|drawings?|figures?(?!\s+out))\b",
+    re.IGNORECASE,
+)
+
+
+def asks_for_visual(question: str) -> bool:
+    return bool(_ASKS_FOR_VISUAL.search(question))
+
+
+def select_images(
+    question: str,
+    passages: list[str],
+    images: list[dict],
+    image_index,
+    max_images: int = 3,
+    min_clip_score: float = 0.25,
+) -> list[dict]:
+    """Pick images to show the answer model, at most max_images.
+
+    Normally an image is sent only if CLIP rates it a strong visual match for the
+    question: its caption is already in the passages, so the picture itself only pays
+    for its extra tokens when it really fits. If the question explicitly asks about an
+    image, chart, diagram, etc., the best matches are sent regardless of score.
+    Images whose captions were retrieved come first.
+    """
+    from src.image_index import linked_image_ids
+
+    explicit = asks_for_visual(question)
+    matches = [
+        image for image, score in image_index.search(question, top_k=len(images))
+        if explicit or score >= min_clip_score
+    ]
+    linked = linked_image_ids(passages)
+    matches.sort(key=lambda image: linked.index(image["id"]) if image["id"] in linked else len(linked))
+    return matches[:max_images]
 
 
 def retrieve(

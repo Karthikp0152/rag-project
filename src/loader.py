@@ -68,8 +68,14 @@ def _image_page_counts(doc) -> Counter:
     return counts
 
 
-def _page_items(doc, page, body_size: float, read_images: bool, image_pages: Counter) -> list[dict]:
-    """Text blocks and images on one page, top to bottom, each marked heading or body."""
+def _page_items(
+    doc, page, body_size: float, read_images: bool, image_pages: Counter, keep_images: bool = False
+) -> list[dict]:
+    """Text blocks and images on one page, top to bottom, each marked heading or body.
+
+    With keep_images, content images (pictures and scanned text, not headings or
+    ornaments) are saved, and their captions carry the saved image's ID.
+    """
     items = []
     for block in page.get_text("dict")["blocks"]:
         if block["type"] != 0:
@@ -87,12 +93,14 @@ def _page_items(doc, page, body_size: float, read_images: bool, image_pages: Cou
                       "heading": is_heading, "text": " ".join(clean.split()) if is_heading else text})
 
     if read_images:
+        from src.image_index import caption, save_image
         from src.image_reader import read_image
 
         for info in page.get_image_info(xrefs=True):
             if info["xref"] == 0 or min(info["width"], info["height"]) < MIN_IMAGE_SIDE:
                 continue
-            result = read_image(_image_png(doc, info["xref"]))
+            png = _image_png(doc, info["xref"])
+            result = read_image(png)
             content = " ".join(result["content"].split())
             if result["kind"] == "decorative" or not content:
                 continue
@@ -102,21 +110,26 @@ def _page_items(doc, page, body_size: float, read_images: bool, image_pages: Cou
                 continue
             if result["kind"] == "text" and _looks_like_heading(content):
                 item = {"heading": True, "text": content}
-            elif result["kind"] == "text":
-                item = {"heading": False, "text": f"[Image text: {content}]"}
             else:
-                item = {"heading": False, "text": f"[Image: {content}]"}
+                image_id = save_image(png) if keep_images else None
+                item = {"heading": False, "text": caption(image_id, result["kind"], content)}
+                if image_id:
+                    item["image"] = {"id": image_id, "page": page.number + 1, "caption": content}
             items.append({"y": info["bbox"][1], "x": info["bbox"][0], **item})
 
     return sorted(items, key=lambda item: (item["y"], item["x"]))
 
 
-def load_pdf_sections(filepath: str, read_images: bool = True) -> list[dict]:
+def load_pdf_sections(
+    filepath: str, read_images: bool = True, images: list[dict] | None = None
+) -> list[dict]:
     """Split a PDF into sections at its headings: [{"heading": str | None, "text": str}].
 
     Headings come from large text or, with read_images, from images whose content is
     short text (decorative chapter titles, names). All heading pieces on one page are
     joined, so "Chapter One" above an epigraph and "Daria" below it become one heading.
+    If an `images` list is given, content images are saved and appended to it as
+    {"id", "page", "caption", "heading"}.
     """
     doc = pymupdf.open(filepath)
     body_size = _body_font_size(doc)
@@ -124,17 +137,20 @@ def load_pdf_sections(filepath: str, read_images: bool = True) -> list[dict]:
     sections = [{"heading": None, "parts": []}]
 
     for page in doc:
-        items = _page_items(doc, page, body_size, read_images, image_pages)
+        items = _page_items(doc, page, body_size, read_images, image_pages, images is not None)
         headings = [item for item in items if item["heading"]]
-        if not headings:
-            sections[-1]["parts"].extend(item["text"] for item in items)
-            continue
-        first = items.index(headings[0])
-        sections[-1]["parts"].extend(item["text"] for item in items[:first])
-        sections.append({
-            "heading": " · ".join(item["text"] for item in headings),
-            "parts": [item["text"] for item in items[first:] if not item["heading"]],
-        })
+        first = items.index(headings[0]) if headings else len(items)
+        before, after = items[:first], [item for item in items[first:] if not item["heading"]]
+        sections[-1]["parts"].extend(item["text"] for item in before)
+        if headings:
+            sections.append({"heading": " · ".join(item["text"] for item in headings), "parts": []})
+        sections[-1]["parts"].extend(item["text"] for item in after)
+        if images is not None:
+            for item in items:
+                if "image" in item:
+                    in_new = headings and item in after
+                    heading = sections[-1]["heading"] if in_new or not headings else sections[-2]["heading"]
+                    images.append({**item["image"], "heading": heading})
 
     result = []
     for section in sections:

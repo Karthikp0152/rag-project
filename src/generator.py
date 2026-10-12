@@ -44,17 +44,28 @@ SOURCE_NOTE = (
 )
 
 
+IMAGE_NOTE = (
+    "Some images from the documents are attached after this text, each preceded by its "
+    "label, like [I1]. Look at them when they help answer the question, and cite them like "
+    "passages, e.g. [I1]. Passages may also contain a text description of an image; if the "
+    "attached image shows more detail than its description, trust the image.\n"
+)
+
+
 def build_prompt(
     question: str,
     chunks: list[str],
     section_headings: bool = False,
     subject: str = "the provided documents",
     source_tags: bool = False,
+    image_labels: list[str] | None = None,
 ) -> str:
     passages = "\n\n".join(
         f"[{i}] {chunk.strip()}" for i, chunk in enumerate(chunks, start=1)
     )
     note = SOURCE_NOTE if source_tags else HEADING_NOTE if section_headings else ""
+    if image_labels:
+        note += IMAGE_NOTE
     return (
         f"You answer questions about {subject} using retrieved passages.\n"
         "The passages are excerpts, may be out of order, and may not all be relevant.\n"
@@ -65,7 +76,8 @@ def build_prompt(
         f"Only if the passages support no part of an answer, reply exactly: {NO_ANSWER}\n"
         "Cite the passage numbers you relied on, like [2].\n\n"
         f"Passages:\n{passages}\n\n"
-        f"Question: {question}\n"
+        + ("Images:\n" + "\n".join(image_labels) + "\n\n" if image_labels else "")
+        + f"Question: {question}\n"
         "Answer:"
     )
 
@@ -77,20 +89,25 @@ def generate_answer(
     section_headings: bool = False,
     subject: str = "the provided documents",
     source_tags: bool = False,
+    images: list[tuple[str, bytes]] | None = None,
 ) -> str:
-    if not chunks:
+    """images: optional (label, png_bytes) pairs, e.g. ("[I1] report.pdf · Results", ...)."""
+    if not chunks and not images:
         return NO_ANSWER
 
     prompt = build_prompt(
         question, chunks, section_headings=section_headings, subject=subject,
-        source_tags=source_tags,
+        source_tags=source_tags, image_labels=[label for label, _ in images] if images else None,
     )
+    contents = [prompt]
+    for label, png in images or []:
+        contents += [label, types.Part.from_bytes(data=png, mime_type="image/png")]
     config = types.GenerateContentConfig(temperature=temperature)
 
     for attempt in range(MAX_RETRIES):
         try:
             response = get_client().models.generate_content(
-                model=GENERATOR_MODEL, contents=prompt, config=config
+                model=GENERATOR_MODEL, contents=contents if images else prompt, config=config
             )
         except errors.APIError as exc:
             if getattr(exc, "code", None) not in RETRYABLE_STATUS or attempt == MAX_RETRIES - 1:
