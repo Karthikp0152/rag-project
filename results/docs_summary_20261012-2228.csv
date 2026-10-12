@@ -1,0 +1,10 @@
+category,A_text_only,B_image_reading,C_images_in_answers
+chart,0.0,1.0,1.0
+cross,0.333,1.0,1.0
+scanned,0.0,0.875,1.0
+table,1.0,1.0,1.0
+text,0.938,1.0,0.938
+unanswerable,1.0,1.0,1.0
+visual,0.0,1.0,1.0
+OVERALL (answerable),0.466,0.983,0.983
+images sent (total),0.0,0.0,37.0
