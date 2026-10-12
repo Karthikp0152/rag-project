@@ -1,0 +1,2 @@
+config,context_recall,context_precision,faithfulness,answer_relevancy,abstention_rate,control_abstained
+chunk-semantic_rerank-on,0.6071428571428571,0.12573696144630384,1.0,0.6118191312188097,0.0,True

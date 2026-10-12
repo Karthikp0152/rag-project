@@ -1,46 +1,81 @@
 import os
+import random
+import time
+
 from dotenv import load_dotenv
 from google import genai
-load_dotenv() #it reads the .env file and loads api key in the environment
-_client=None
-def get_client()->genai.Client:
-    #it loads the api client and caches it for reuse
+from google.genai import errors
+from google.genai import types
+
+load_dotenv()
+
+GENERATOR_MODEL = "gemini-2.5-flash"
+NO_ANSWER = "You do not have enough information."
+MAX_RETRIES = 5
+RETRYABLE_STATUS = (429, 500, 502, 503, 504)
+
+_client = None
+
+
+def get_client() -> genai.Client:
     global _client
     if _client is None:
-      api_key=os.environ["GEMINI_API_KEY"]
-      _client=genai.Client(api_key=api_key)
+        _client = genai.Client(
+            vertexai=True,
+            project=os.environ["VERTEX_PROJECT_ID"],
+            location=os.environ.get("VERTEX_LOCATION", "us-central1"),
+        )
     return _client
-def build_prompt(question:str,chunks:list[str])->str:
-    #it combines the query and the top k retrieved chunks and generates a prompt
-    context="\n\n".join(chunks)
-    prompt=f"""Answer the question using only the context below.If the context doesn't contain the answer,say you do not have enough information.
-    Context:{context}
-    Question:{question}
-    """
-    return prompt
-def generate_answer(question:str,chunks:list[str])->str:
-   #sends the question and the chunks to gemini and returns the answer.
-   client=get_client()
-   prompt=build_prompt(question,chunks)
-   response=client.models.generate_content(
-      model="gemini-2.5-flash",
-      contents=prompt,
-   )
-   return response.text
-if __name__=="__main__":
-   from src.loader import load_pdf
-   from src.chunker import chunk_text
-   from src.embeddings import embed_chunks
-   from src.vectorstore import VectorStore
-   text=load_pdf("data/_OceanofPDF.com_Pretty_Reckless_-_LJ_Shen.pdf")
-   chunks=chunk_text(text)
-   embeddings=embed_chunks(chunks)
-   store=VectorStore(dimension=embeddings[0].shape[0])
-   store.add(embeddings,chunks)
-   question="What happens between main characters?"
-   query_embedding=embed_chunks([question])[0]
-   results=store.search(query_embedding,top_k=3)
-   retrieved_chunks=[r["chunk"]for r in results]
-   answer=generate_answer(question,retrieved_chunks)
-   print("Question:",question)
-   print("\nAnswer:",answer)
+
+
+def build_prompt(question: str, chunks: list[str]) -> str:
+    passages = "\n\n".join(
+        f"[{i}] {chunk.strip()}" for i, chunk in enumerate(chunks, start=1)
+    )
+    return (
+        "You answer questions about a novel using retrieved passages.\n"
+        "The passages are excerpts, may be out of order, and may not all be relevant.\n"
+        "Use only what the passages state. Do not use outside knowledge.\n"
+        "Partial evidence is still evidence: answer what the passages support and say "
+        "what remains unclear.\n"
+        f"Only if the passages support no part of an answer, reply exactly: {NO_ANSWER}\n"
+        "Cite the passage numbers you relied on, like [2].\n\n"
+        f"Passages:\n{passages}\n\n"
+        f"Question: {question}\n"
+        "Answer:"
+    )
+
+
+def generate_answer(question: str, chunks: list[str], temperature: float = 0.0) -> str:
+    if not chunks:
+        return NO_ANSWER
+
+    prompt = build_prompt(question, chunks)
+    config = types.GenerateContentConfig(temperature=temperature)
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = get_client().models.generate_content(
+                model=GENERATOR_MODEL, contents=prompt, config=config
+            )
+        except errors.APIError as exc:
+            if getattr(exc, "code", None) not in RETRYABLE_STATUS or attempt == MAX_RETRIES - 1:
+                raise
+            time.sleep(2**attempt + random.random())
+            continue
+        text = getattr(response, "text", None)
+        return text.strip() if text else NO_ANSWER
+
+    return NO_ANSWER
+
+
+if __name__ == "__main__":
+    from src.pipeline_run import build_pipeline, run_query
+
+    # Recommended configuration from the evaluation: semantic chunking + reranker.
+    store, hybrid = build_pipeline(use_semantic_chunking=True)
+    question = "What happens between the main characters?"
+    contexts, answer = run_query(question, store, hybrid, use_reranking=True)
+    print("Question:", question)
+    print(f"\nRetrieved {len(contexts)} passages")
+    print("\nAnswer:", answer)
