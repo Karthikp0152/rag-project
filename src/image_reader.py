@@ -1,8 +1,10 @@
 import hashlib
+import io
 import json
 import os
 
 from google.genai import types
+from PIL import Image
 from pydantic import BaseModel
 
 from src.generator import GENERATOR_MODEL, get_client
@@ -45,6 +47,16 @@ def _save_cache() -> None:
     os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
     with open(CACHE_PATH, "w", encoding="utf-8") as f:
         json.dump(_cache, f, indent=2, ensure_ascii=False)
+
+
+def to_png(image_bytes: bytes) -> bytes:
+    """Convert any format Pillow can open (JPEG, WebP, GIF, BMP, TIFF...) to PNG."""
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        if img.mode not in ("RGB", "RGBA", "L", "LA"):
+            img = img.convert("RGBA")
+        out = io.BytesIO()
+        img.save(out, format="PNG")
+        return out.getvalue()
 
 
 def read_image(png_bytes: bytes) -> dict:

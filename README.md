@@ -13,6 +13,7 @@ failures found along the way and how each was handled.
 - [Evaluation setup](#evaluation-setup)
 - [Results](#results)
 - [Reading images (multimodal step 1)](#reading-images-multimodal-step-1)
+- [Asking about your own files (step 2)](#asking-about-your-own-files-step-2)
 - [Failures and how they were contained](#failures-and-how-they-were-contained)
 - [Known limitations](#known-limitations)
 - [Running it](#running-it)
@@ -81,6 +82,11 @@ Answers kept calling someone "the narrator" as if it were a separate character. 
 book's chapter headings, including the narrator's name, are **images**, invisible to text
 extraction. Added image reading with Gemini and section-heading tags on every chunk (see
 [Reading images](#reading-images-multimodal-step-1) and Failures 7–9).
+
+### Phase 8: Any file, several at once (Oct)
+Removed the dependence on this one book: the system now loads PDF, Word, image, and text/Markdown
+files, indexes several together, caches each file's processing on disk, and answers questions in
+an interactive terminal loop (see [Asking about your own files](#asking-about-your-own-files-step-2)).
 
 ## Evaluation setup
 
@@ -234,6 +240,62 @@ images, it named both correctly and never used "narrator".
 `python -m src.generator` runs. Image reading was only evaluated on this configuration, not on the
 other three.
 
+## Asking about your own files (step 2)
+
+```bash
+python -m src.ask handbook.docx meeting_notes.jpg faq.md
+```
+```
+Loading 3 file(s)... (first load of a file can take a few minutes)
+Ready: 6 passages. Ask a question, or press Enter to quit.
+
+> What is the return window for furniture?
+The return window for furniture is 60 days [1].
+
+Sources:
+  [1] handbook.docx · Northwind Store Handbook · Refund Policy · Exceptions
+```
+
+### Supported files
+| Type | How it is read | Headings come from |
+|---|---|---|
+| `.pdf` | text with `pymupdf`; images read by Gemini (scanned pages are transcribed) | large text, or short text in images |
+| `.docx` | paragraphs in order; tables written row by row with their column names (*"Product line: Furniture; Return window: 60 days"*); embedded images read by Gemini | Word's Title and Heading 1–6 styles |
+| `.png` `.jpg` `.webp` … | Gemini transcribes a photographed or scanned page, or describes a chart or photo | none (one section) |
+| `.txt` `.md` | plain text | Markdown `#` headings |
+
+Every chunk is tagged with its file and heading path, e.g.
+`[handbook.docx · Northwind Store Handbook · Refund Policy · Exceptions]`. Answers cite passages,
+and the loop lists which file and section each cited passage came from.
+
+### How it works
+- [src/documents.py](src/documents.py) reads each file type into sections with a heading path.
+- `build_library` in [src/pipeline_run.py](src/pipeline_run.py) chunks every file, tags each chunk,
+  and indexes all files together. It uses the recommended setup by default (semantic chunks,
+  reranker, image reading); `--fixed`, `--no-rerank`, and `--no-images` switch parts off.
+- **Caching:** each file's chunks are saved in `.cache/library/`, keyed by the file's *content*, and
+  embeddings are cached too. Loading the book plus two small files took 556 s the first time and
+  11 s the second. An edited file is detected and rebuilt automatically.
+- The answer prompt says *"the provided documents"* instead of *"a novel"*, and asks the model to
+  name the file it cites. The book evaluation still passes *"a novel"*.
+
+### Testing
+- **No change to the book pipeline:** for all four configurations, with and without images, the
+  book produces exactly the same chunks as before (checked by fingerprint), and its prompts are
+  word-for-word identical. The RAGAS results above therefore still apply.
+- **Sample files**, one question per file type, all answered correctly with the right source:
+
+| Question | Answer | Read from |
+|---|---|---|
+| Return window for furniture? | 60 days | table in a Word file |
+| Which quarter had the most returns? | Q3, 210 | bar-chart image in a Word file |
+| When does the Reno warehouse close, and who moves the stock? | 30 June 2026, Tomas | tilted photo of a printed page |
+| Points needed for a $10 voucher? | 500 | Markdown file |
+| Who is the CEO? (not in any file) | *"You do not have enough information."* | — |
+
+This is a functional check, not a RAGAS evaluation: scoring other document types properly needs
+new test questions with reference answers for them.
+
 ## Failures and how they were contained
 
 ### 1. Semantic chunking found nothing (recall 0.00)
@@ -321,6 +383,14 @@ test for headings.
 **Fix:** a heading candidate must not end in sentence punctuation (`. ! ? "`). Real headings
 rarely do.
 
+### 10. Word documents lost their title and garbled tables
+**Symptom:** in the first version of the Word reader, the document title disappeared from heading
+paths, and table rows ran together (*"Return window Electronics | 30 days Furniture | 60 days"*).
+**Cause:** the title was treated as the same level as a top heading, so the next heading replaced
+it. Table rows were separated by single line breaks, which text cleanup joins into one line.
+**Fix:** the title is level 0, so it leads every heading path. Each table row is written as its
+own paragraph with its column names, so a row still makes sense after chunking splits the table.
+
 ## Known limitations
 
 - **First-person passages without names** (Failure 6) can still be hard to retrieve. Section tags
@@ -333,6 +403,10 @@ rarely do.
   middle of a page.
 - **Heading detection is heuristic** (font size, short text, no sentence ending, repeated
   pictures). It fits this book; other layouts may need tuning.
+- **File types:** no `.doc`, `.pptx`, `.xlsx`, or HTML yet. Tables inside PDFs are read as plain
+  text, without the row-by-row column labels Word tables get.
+- **No evaluation on other document types.** The sample files show the readers work, but there is
+  no RAGAS test set for them yet.
 - **The refusal check is pattern-based.** An answer that invents a fact *and* says "the passages
   do not mention…" would count as a refusal. No observed answer did this.
 - **Small test set.** 22 scored questions only detect differences larger than ~0.05–0.1. Some
@@ -363,7 +437,8 @@ VERTEX_LOCATION=us-central1
 Run:
 
 ```bash
-python -m src.generator                    # ask one question end to end (semantic + reranker + images)
+python -m src.ask file1.pdf file2.docx ...  # ask questions about your own files (interactive)
+python -m src.generator                    # one fixed demo question about the book
 python -m src.run_evaluation               # all 4 configurations (~1 hour)
 python -m src.run_evaluation --only 3      # one config: 0 fixed/off, 1 fixed/on, 2 semantic/off, 3 semantic/on
 python -m src.run_evaluation --only 3 --read-images   # same, with image reading and section tags

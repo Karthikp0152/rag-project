@@ -36,14 +36,29 @@ HEADING_NOTE = (
 )
 
 
-def build_prompt(question: str, chunks: list[str], section_headings: bool = False) -> str:
+SOURCE_NOTE = (
+    "After its number, each passage starts with its source in brackets: the file name, "
+    "then its section heading if it has one, like [report.pdf · Refunds]. Use the heading "
+    "as context; in first-person text, a person's name in the heading usually identifies "
+    "who \"I\" is. When you cite a passage, also name its file, like [2] (report.pdf).\n"
+)
+
+
+def build_prompt(
+    question: str,
+    chunks: list[str],
+    section_headings: bool = False,
+    subject: str = "the provided documents",
+    source_tags: bool = False,
+) -> str:
     passages = "\n\n".join(
         f"[{i}] {chunk.strip()}" for i, chunk in enumerate(chunks, start=1)
     )
+    note = SOURCE_NOTE if source_tags else HEADING_NOTE if section_headings else ""
     return (
-        "You answer questions about a novel using retrieved passages.\n"
+        f"You answer questions about {subject} using retrieved passages.\n"
         "The passages are excerpts, may be out of order, and may not all be relevant.\n"
-        + (HEADING_NOTE if section_headings else "")
+        + note
         + "Use only what the passages state. Do not use outside knowledge.\n"
         "Partial evidence is still evidence: answer what the passages support and say "
         "what remains unclear.\n"
@@ -56,12 +71,20 @@ def build_prompt(question: str, chunks: list[str], section_headings: bool = Fals
 
 
 def generate_answer(
-    question: str, chunks: list[str], temperature: float = 0.0, section_headings: bool = False
+    question: str,
+    chunks: list[str],
+    temperature: float = 0.0,
+    section_headings: bool = False,
+    subject: str = "the provided documents",
+    source_tags: bool = False,
 ) -> str:
     if not chunks:
         return NO_ANSWER
 
-    prompt = build_prompt(question, chunks, section_headings=section_headings)
+    prompt = build_prompt(
+        question, chunks, section_headings=section_headings, subject=subject,
+        source_tags=source_tags,
+    )
     config = types.GenerateContentConfig(temperature=temperature)
 
     for attempt in range(MAX_RETRIES):
